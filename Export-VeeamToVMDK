@@ -44,13 +44,15 @@ function Export-VeeamToVMDK {
                 "$(Get-date -format s) .... [INFO] Remove old backup ${DestPath}\${VMName}" | Out-File -append "${TempOutPath}\Restore_${VMName}.log"
                 Remove-Item -Recurse -Force "${DestPath}\${VMName}" -ErrorAction SilentlyContinue | Out-Null
             }
+
+            # 移動暫存檔到正式目錄
+            Move-Item "${TempOutPath}\${VMName}" "${DestPath}" -Force
+            "$(Get-date -format s) .... [INFO] Move to ${DestPath}\${VMName} OK" | Out-File -append "${TempOutPath}\Restore_${VMName}.log"
+
             # 複製 LOG 到目的地
             Copy-Item "${TempOutPath}\Restore_${RestoreVM}.log" "${DestPath}\${VMName}"
-            Rename-Item "${DestPath}\${VMName}\Restore_${RestoreVM}.log" "${TempOutPath}\Restore_${RestoreVM}-$($RestorePoint.CreationTime.ToString('yyyyMMddHHmmss')).log"
+            Rename-Item "${DestPath}\${VMName}\Restore_${RestoreVM}.log" "Restore_${RestoreVM}-$($RestorePoint.CreationTime.ToString('yyyyMMddHHmmss')).log"
             
-            # 移動暫存檔到正式目錄
-            Move-Item "${TempOutPath}\${VMName}" "${DestPath}"
-            "$(Get-date -format s) .... [INFO] Move to ${DestPath}\${VMName} OK" | Out-File -append "${TempOutPath}\Restore_${VMName}.log"
             Rename-Item "${TempOutPath}\Restore_${RestoreVM}.log" "${TempOutPath}\Restore_${RestoreVM}-$($RestorePoint.CreationTime.ToString('yyyyMMddHHmmss')).log"
             return $true
         }
@@ -90,17 +92,10 @@ else {
     # 檢查要匯出的主機是否在本機備份清單中
     if ((Get-VBRJobObject -Job $(Get-VBRJob)).Name -contains ${RestoreVM}) {
         # 有就直接匯出
-        Export-VeeamToVMDK -VMName ${RestoreVM}
+        $result = Export-VeeamToVMDK -VMName ${RestoreVM}
     }
     else {
         # 如果沒有，跑匯入備份檔並匯出的流程
-
-        # 先移除所有匯入任務
-        $imported = Get-VBRBackup | Where-Object jobname -like '*imported'
-        if ($imported.count -gt 0) {
-            #"$(Get-Date -Format s) !!!! [WRAN] 【${RestoreVM}】 imported" | Out-File -append "${TempOutPath}\Restore_${RestoreVM}.log"
-            #Remove-VBRBackup -Confirm
-        }
 
         # 找到 VBK 檔
         $VBKSource = Get-ChildItem -Recurse -File "$VBKSourceRoot" | Where-Object { $_.Extension -eq '.vbk' -and $_.Name -like "$($RestoreVM).*" } | Sort-Object LastWriteTime -Descending | Select-Object Name, Fullname, LastWriteTime -First 1
@@ -117,10 +112,16 @@ else {
             }
 
             # 開始匯出
-            if (Export-VeeamToVMDK -VMName ${RestoreVM}) {
-                # 成功匯出後中斷匯入檔
-                #$imported = Get-VBRBackup | Where-Object jobname -like '*imported'
-                #Remove-VBRBackup -Backup $imported -Confirm
+            $result = Export-VeeamToVMDK -VMName ${RestoreVM}
+            if ($result) {
+                # 成功匯出後移除匯入檔
+                #$imported = Get-VBRBackup -Name '*imported'
+                #if ($imported.count -gt 0) {
+                    #if ((Get-VBRRestorePoint -Backup $imported -Name $RestoreVM).Count -gt 0) {
+                        #"$(Get-Date -Format s) !!!! [WRAN] 【${RestoreVM}】 imported" | Out-File -append "${TempOutPath}\Restore_${RestoreVM}.log"
+                    #}
+                    #Remove-VBRBackup -Confirm
+                #}
             }
             else {
                 
