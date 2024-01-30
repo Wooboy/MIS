@@ -123,7 +123,7 @@ function Export-VeeamToVMDK {
 
         # 複製 LOG 到目的地
         Copy-Item "${env:Temp}\Restore_${VMName}.log" "${OutPath}\${VMName}"
-        Rename-Item "${OutPath}\${VMName}\Restore_${VMName}.log" "Restore_${VMName}-$($RestorePoint.CreationTime.ToString('yyyyMMddHHmmss')).log"
+        Rename-Item "${OutPath}\${VMName}\Restore_${VMName}.log" "Restore_${VMName}-$($RestorePoint.CreationTime.ToString('yyyyMMdd_HHmm')).log"
         
         return $true
     }
@@ -156,6 +156,14 @@ if ($null -eq $RestoreServer) {
     Out-LogFile -Level Error -Content "Connection error" -LogFilePath "${env:Temp}\Restore_VMDK.log"
 }
 else {
+    # 先移除已匯入的備份，避免沒抓到最新版
+    $imported = Get-VBRBackup -Name '*imported'
+    if ($imported.count -gt 0) {
+        #Remove-VBRBackup -Backup $imported -Confirm
+    }
+    
+    # 取得所有 VBM
+    $backupMetas = Get-ChildItem -File $VBKSourceRoot -Include '*.vbm' -Recurse
     
     foreach ($VMName in $vms) {
         Write-Host "Process ${VMName}"
@@ -169,45 +177,61 @@ else {
         else {
             # 如果沒有，跑匯入備份檔並匯出的流程
 
-            # 找到 VBK 檔
-            $VBKSource = Get-ChildItem -Recurse -File "$VBKSourceRoot" | Where-Object { $_.Extension -eq '.vbk' -and $_.Name -like "$($VMName).*" } | Sort-Object LastWriteTime -Descending | Select-Object Name, Fullname, LastWriteTime -First 1
+            # 找到 VBM 檔
+            $vbm = $backupMetas | Where-Object FullName -like "*${VMName}*"
+            
+            # 檢查 VBM 檔是否存在
+            if ($vbm.count -gt 0) {
+                $xml = (Select-Xml -path $vbm -XPath '/').Node
+                
+                # 找到 VMK 檔
+                $VBKSource = ($xml.BackupMeta.BackupMetaInfo.Storages.Storage | Where-Object FilePath -like '*.vbk' | Sort-Object CreationTime -Descending | Select-Object -First 1).FilePath
+                $VBKSource = $VBKSource.Replace('\\cylvb1.cylee.com\backup_repo$', 'F:\Backup_Repo')
+                Out-LogFile -Level Info -Content "VBK: ${VBKSource}"
 
-            # 如果有找到再繼續
-            if (-not [string]::IsNullOrEmpty($VBKSource.Name)) {
-                # 匯入 VBK
-                try {
-                    Out-LogFile -Level Info -Content "import $($VBKSource.Name)" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
-                    Import-VBRBackup -Server $RestoreServer -FileName "$($VBKSource.Fullname)"
-                }
-                catch {
-                    Out-LogFile -Level Error -Content "import ${VMName} fail" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
-                }
+                if (Test-Path $VBKSource) {
+                    #$VBKSource = Get-ChildItem -Recurse -File "$VBKSourceRoot" | Where-Object { $_.Extension -eq '.vbk' -and $_.Name -like "$($VMName).*" } | Sort-Object LastWriteTime -Descending | Select-Object Name, Fullname, LastWriteTime -First 1
 
-                # 開始匯出
-                $result = Export-VeeamToVMDK -VMName ${VMName} -OutPath ${DestPath}
-                if ($result) {
-                    # 成功匯出後移除匯入檔
-                    #$imported = Get-VBRBackup -Name '*imported'
-                    #if ($imported.count -gt 0) {
-                    #if ((Get-VBRRestorePoint -Backup $imported -Name $VMName).Count -gt 0) {
-                    #"$(Get-Date -Format s) !!!! [WRAN] 【${VMName}】 imported" | Out-File -append "${DestPath}\Restore_${VMName}.log"
-                    #}
-                    #Remove-VBRBackup -Backup $imported -Confirm
-                    #}
+                    # 如果有找到再繼續
+                    # 匯入 VBK
+                    try {
+                        Out-LogFile -Level Info -Content "import ${VMName} vbk" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                        Import-VBRBackup -Server $RestoreServer -FileName "${VBKSource}"
+                    }
+                    catch {
+                        Out-LogFile -Level Error -Content "import ${VMName} fail" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                    }
+
+                    # 開始匯出
+                    $result = Export-VeeamToVMDK -VMName ${VMName} -OutPath ${DestPath}
+                    if ($result) {
+                        # 成功匯出後移除匯入檔
+                        #$imported = Get-VBRBackup -Name '*imported'
+                        #if ($imported.count -gt 0) {
+                        #if ((Get-VBRRestorePoint -Backup $imported -Name $VMName).Count -gt 0) {
+                        #"$(Get-Date -Format s) !!!! [WRAN] 【${VMName}】 imported" | Out-File -append "${DestPath}\Restore_${VMName}.log"
+                        #}
+                        #Remove-VBRBackup -Backup $imported -Confirm
+                        #}
+                    }
+                    else {
+                
+                    }
                 }
                 else {
-                
+                    Out-LogFile -Level Error -Content "${VMName} VBK Not found" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
                 }
             }
             else {
-                Out-LogFile -Level Error -Content "${VMName} Not found" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                Out-LogFile -Level Error -Content "${VMName} BackupMeta Not found" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
             }
+            
         }
 
         if (Test-Path "${env:Temp}\Restore_${VMName}.log") {
             New-Item -ItemType Directory "${DestPath}\XXX-Log" -Force -ErrorAction SilentlyContinue | Out-Null
             Move-Item "${env:Temp}\Restore_${VMName}.log" "${DestPath}\XXX-Log" -Force
-            Rename-Item "${DestPath}\XXX-Log\Restore_${VMName}.log" "Restore_${VMName}-$(Get-Date -Format 'yyyyMMddHHmmss').log" -Force
+            Rename-Item "${DestPath}\XXX-Log\Restore_${VMName}.log" "Restore_${VMName}-$(Get-Date -Format 'yyyyMMdd_HHmm').log" -Force
         }
     }
 
@@ -220,5 +244,5 @@ Out-LogFile -Level Info -Content "  End Export VMDK" -LogFilePath "${env:Temp}\R
 if (Test-Path "${env:Temp}\Restore_VMDK.log") {
     New-Item -ItemType Directory "${DestPath}\XXX-Log" -Force -ErrorAction SilentlyContinue | Out-Null
     Move-Item "${env:Temp}\Restore_VMDK.log" "${DestPath}\XXX-Log" -Force
-    Rename-Item "${DestPath}\XXX-Log\Restore_VMDK.log" "Restore_VMDK-$(Get-Date -Format 'yyyyMMddHHmmss').log" -Force
+    Rename-Item "${DestPath}\XXX-Log\Restore_VMDK.log" "Restore_VMDK-$(Get-Date -Format 'yyyyMMdd_HHmm').log" -Force
 }
