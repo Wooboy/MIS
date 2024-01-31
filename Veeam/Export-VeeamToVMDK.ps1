@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Continue'
 # ==== SCRIPT SETTINGS ====
 $VBKSourceRoot = 'F:\Backup_Repo'
 $DestPath = "E:\DR-VMDK"
-$vms = @('VM1','VM2')
+$vms = @('VM1', 'VM2')
 # ==== SCRIPT SETTINGS END ====
 
 function Out-LogFile {
@@ -13,39 +13,53 @@ function Out-LogFile {
         [string] $Level,
         [Parameter(Mandatory = $true, Position = 1)]
         [string] $Content,
-        
+        [Parameter(Mandatory = $false)]
+        [switch] $ShowOnConsole = $false,
         [Parameter(Mandatory = $false)]
         [string] $LogFilePath
     )
     $LevelString = ""
 
-    Write-Host -NoNewline "$(Get-Date -Format s) "
+    $ShowOnConsole = $ShowOnConsole -or (-not [string]::IsNullOrEmpty($LogFilePath))
+
+    if ($ShowOnConsole) {
+        Write-Host -NoNewline "$(Get-Date -Format s) "
+    }
+        
     switch ($Level) {
         'None' {
             break;
         }
         'Info' {
             $LevelString = "INFO"
-            Write-Host -NoNewline -ForegroundColor White -BackgroundColor Green $LevelString
-            Write-Host -NoNewline " "
+            if ($ShowOnConsole) {
+                Write-Host -NoNewline -ForegroundColor White -BackgroundColor Green $LevelString
+                Write-Host -NoNewline " .... "
+            }
             break;
         }
         'Warn' {
             $LevelString = "WARN"
-            Write-Host -NoNewline -ForegroundColor Black -BackgroundColor Yellow $LevelString
-            Write-Host -NoNewline " "
+            if ($ShowOnConsole) {
+                Write-Host -NoNewline -ForegroundColor Black -BackgroundColor Yellow $LevelString
+                Write-Host -NoNewline " !!!! "
+            }
             break;
         }
         'Error' {
             $LevelString = "ERRR"
-            Write-Host -NoNewline -ForegroundColor White -BackgroundColor Red $LevelString
-            Write-Host -NoNewline " "
+            if ($ShowOnConsole) {
+                Write-Host -NoNewline -ForegroundColor White -BackgroundColor Red $LevelString
+                Write-Host -NoNewline " #### "
+            }
             break;
         }
         Default {}
     }
-    Write-Host $Content
-
+    if ($ShowOnConsole) {
+        Write-Host $Content
+    }
+    
     if (-not [string]::IsNullOrEmpty($LogFilePath)) {
         if ($Level.Equals('None')) {
             "$(Get-Date -Format s)           ${Content}" | Out-File -FilePath "${LogFilePath}" -Append
@@ -168,6 +182,7 @@ else {
     foreach ($VMName in $vms) {
         Write-Host "Process ${VMName}"
         Out-LogFile -Level Info -Content "Start Export 【${VMName}】" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+        Out-LogFile -Level Info -Content "Start Export 【${VMName}】" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
         
         # 檢查要匯出的主機是否在本機備份清單中
         if ((Get-VBRJobObject -Job $(Get-VBRJob)).Name -contains ${VMName}) {
@@ -186,33 +201,30 @@ else {
                 
                 # 找到 VMK 檔
                 $VBKSource = ($xml.BackupMeta.BackupMetaInfo.Storages.Storage | Where-Object FilePath -like '*.vbk' | Sort-Object CreationTime -Descending | Select-Object -First 1).FilePath
-                $VBKSource = $VBKSource.Replace('\\cylvb1.cylee.com\backup_repo$', 'F:\Backup_Repo')
-                Out-LogFile -Level Info -Content "VBK: ${VBKSource}"
+
+                # 替換網路路徑為本機路徑
+                $VBKSource = $VBKSource.ToLower()
+                $VBKSource = $VBKSource.Replace('\\BKSERVERNAME\BKFOLDER$', 'F:\backup_repo')
+                Out-LogFile -Level Info -Content "VBK: ${VBKSource}" -LogFilePath "${env:Temp}\Restore_${VMName}.log" -ShowOnConsole
 
                 if (Test-Path $VBKSource) {
-                    #$VBKSource = Get-ChildItem -Recurse -File "$VBKSourceRoot" | Where-Object { $_.Extension -eq '.vbk' -and $_.Name -like "$($VMName).*" } | Sort-Object LastWriteTime -Descending | Select-Object Name, Fullname, LastWriteTime -First 1
-
                     # 如果有找到再繼續
                     # 匯入 VBK
                     try {
                         Out-LogFile -Level Info -Content "import ${VMName} vbk" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                        Out-LogFile -Level Info -Content "import ${VMName} vbk" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
                         Import-VBRBackup -Server $RestoreServer -FileName "${VBKSource}"
                     }
                     catch {
                         Out-LogFile -Level Error -Content "import ${VMName} fail" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                        Out-LogFile -Level Error -Content "import ${VMName} fail" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
                     }
 
                     # 開始匯出
                     $result = Export-VeeamToVMDK -VMName ${VMName} -OutPath ${DestPath}
                     if ($result) {
                         # 成功匯出後移除匯入檔
-                        #$imported = Get-VBRBackup -Name '*imported'
-                        #if ($imported.count -gt 0) {
-                        #if ((Get-VBRRestorePoint -Backup $imported -Name $VMName).Count -gt 0) {
-                        #"$(Get-Date -Format s) !!!! [WRAN] 【${VMName}】 imported" | Out-File -append "${DestPath}\Restore_${VMName}.log"
-                        #}
                         #Remove-VBRBackup -Backup $imported -Confirm
-                        #}
                     }
                     else {
                 
@@ -220,10 +232,12 @@ else {
                 }
                 else {
                     Out-LogFile -Level Error -Content "${VMName} VBK Not found" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                    Out-LogFile -Level Error -Content "${VMName} VBK Not found" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
                 }
             }
             else {
                 Out-LogFile -Level Error -Content "${VMName} BackupMeta Not found" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                Out-LogFile -Level Error -Content "${VMName} BackupMeta Not found" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
             }
             
         }
