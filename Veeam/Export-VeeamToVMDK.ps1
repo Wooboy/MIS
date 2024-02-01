@@ -1,82 +1,20 @@
 $ErrorActionPreference = 'Continue'
 
-# ==== SCRIPT SETTINGS ====
-$VBKSourceRoot = 'F:\Backup_Repo'
-$DestPath = "E:\DR-VMDK"
+# ======== SCRIPT SETTINGS     ========
 $vms = @('VM1', 'VM2')
-# ==== SCRIPT SETTINGS END ====
+$VBKSourceRoot = 'F:\Backup_Repo'
+$TargetDisk = 'D:'
+$DestPath = "${TargetDisk}\02-DR_VMDK"
+$LogFolder = "${TargetDisk}\99-Log"
+$LogPath = "${LogFolder}\Backup_2nd-$(Get-Date -Format 'yyyyMMdd').log"
+# ======== SCRIPT SETTINGS END ========
 
-function Out-LogFile {
-    param (
-        [Parameter(Mandatory = $true, Position = 0)]
-        [ValidateSet('None', 'Info', 'Warn', 'Error')]
-        [string] $Level,
-        [Parameter(Mandatory = $true, Position = 1)]
-        [string] $Content,
-        [Parameter(Mandatory = $false)]
-        [switch] $ShowOnConsole = $false,
-        [Parameter(Mandatory = $false)]
-        [string] $LogFilePath
-    )
-    $LevelString = ""
+# ======== CREATE FOLDER     ========
+New-Item -ItemType Directory "${DestPath}" -Force -ErrorAction SilentlyContinue | Out-Null
+New-Item -ItemType Directory "${LogFolder}" -Force -ErrorAction SilentlyContinue | Out-Null
+# ======== CREATE FOLDER END ========
 
-    $ShowOnConsole = $ShowOnConsole -or (-not [string]::IsNullOrEmpty($LogFilePath))
-
-    if ($ShowOnConsole) {
-        Write-Host -NoNewline "$(Get-Date -Format s) "
-    }
-        
-    switch ($Level) {
-        'None' {
-            break;
-        }
-        'Info' {
-            $LevelString = "INFO"
-            if ($ShowOnConsole) {
-                Write-Host -NoNewline -ForegroundColor White -BackgroundColor Green $LevelString
-                Write-Host -NoNewline " .... "
-            }
-            break;
-        }
-        'Warn' {
-            $LevelString = "WARN"
-            if ($ShowOnConsole) {
-                Write-Host -NoNewline -ForegroundColor Black -BackgroundColor Yellow $LevelString
-                Write-Host -NoNewline " !!!! "
-            }
-            break;
-        }
-        'Error' {
-            $LevelString = "ERRR"
-            if ($ShowOnConsole) {
-                Write-Host -NoNewline -ForegroundColor White -BackgroundColor Red $LevelString
-                Write-Host -NoNewline " #### "
-            }
-            break;
-        }
-        Default {}
-    }
-    if ($ShowOnConsole) {
-        Write-Host $Content
-    }
-    
-    if (-not [string]::IsNullOrEmpty($LogFilePath)) {
-        if ($Level.Equals('None')) {
-            "$(Get-Date -Format s)           ${Content}" | Out-File -FilePath "${LogFilePath}" -Append
-        }
-        elseif ($Level.Equals('Info')) {
-            "$(Get-Date -Format s) ${LevelString} .... ${Content}" | Out-File -FilePath "${LogFilePath}" -Append
-        }
-        elseif ($Level.Equals('Warn')) {
-            "$(Get-Date -Format s) ${LevelString} !!!! ${Content}" | Out-File -FilePath "${LogFilePath}" -Append
-        }
-        elseif ($Level.Equals('Error')) {
-            "$(Get-Date -Format s) ${LevelString} #### ${Content}" | Out-File -FilePath "${LogFilePath}" -Append
-        }
-        else {
-        }
-    }
-}
+Import-Module "${PSScriptRoot}\Out-LogFile.ps1"
 
 function Export-VeeamToVMDK {
     param (
@@ -84,8 +22,11 @@ function Export-VeeamToVMDK {
         [Parameter(Mandatory = $true)][string] $OutPath
     )
     <#
-    .Description
+    .DESCRIPTION
     Only tested on Veeam 12
+
+    .OUTPUTS
+    boolean 
     #>
 
     $RestorePoint = Get-VBRRestorePoint -Name ${VMName} | Sort-Object creationtime -Descending | Select-Object -first 1
@@ -113,7 +54,7 @@ function Export-VeeamToVMDK {
     Out-LogFile -Level Info -Content "Start Export 【${VMName}@$($RestorePoint.CreationTime.tostring('s'))】" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
 
     # 開始匯出
-    $proc = Start-VBRRestoreVMFiles  -RestorePoint $RestorePoint -server ${restoreServer} -Path "${OutPath}\${VMName}-Temp" -Reason "Batch export"
+    $proc = Start-VBRRestoreVMFiles  -RestorePoint $RestorePoint -server ${VeeamBackupServer} -Path "${OutPath}\${VMName}-Temp" -Reason "Batch export"
     if ($proc.result -eq 'Success') {
         # 匯出成功
         $endtime = Get-date
@@ -151,43 +92,42 @@ function Export-VeeamToVMDK {
     }
 }
 
-Out-LogFile -Level Info -Content "Start Export VMDK" -LogFilePath "${env:Temp}\Restore_VMDK.log"
+Out-LogFile -Level Info -Content "======== Start Export VMDK" -LogFilePath "${LogPath}"
 
 # 開啟連線
-$RestoreServer = $null
+$VeeamBackupServer = $null
 # 先檢查是否已連線
 try {
-    $RestoreServer = (Get-VBRServer -ErrorAction SilentlyContinue | Where-Object type -eq 'Local')
+    $VeeamBackupServer = (Get-VBRServer -Type Local -ErrorAction SilentlyContinue)
 }
 catch {
     Connect-VBRServer -Server localhost
-    $RestoreServer = (Get-VBRServer -ErrorAction SilentlyContinue .\.affinityilentlyContinue | Where-Object type -eq 'Local')
+    $VeeamBackupServer = (Get-VBRServer -Type Local -ErrorAction SilentlyContinue)
 }
 
-# 如果沒有建立連線，回覆錯誤並結束
-if ($null -eq $RestoreServer) {
-    Write-Host "Connection error"
-    Out-LogFile -Level Error -Content "Connection error" -LogFilePath "${env:Temp}\Restore_VMDK.log"
+if ($null -eq $VeeamBackupServer) {
+    # 如果沒有建立連線，回覆錯誤並結束
+    Out-LogFile -Level Error -Content "Connection error" -LogFilePath "${LogPath}" -ShowOnConsole
+}
+elseif (([Veeam.Backup.Core.CBaseSession]::GetRunning() | Where-Object JobType -eq 'RestoreVmFiles').count -gt 0) {
+    # 當已經有任務在執行時中斷
+    Out-LogFile -Level Error -Content "Some jobs running" -LogFilePath "${LogPath}" -ShowOnConsole
 }
 else {
-    # 先移除已匯入的備份，避免沒抓到最新版
-    $imported = Get-VBRBackup -Name '*imported'
-    if ($imported.count -gt 0) {
-        #Remove-VBRBackup -Backup $imported -Confirm
-    }
-    
-    # 取得所有 VBM
-    $backupMetas = Get-ChildItem -File $VBKSourceRoot -Include '*.vbm' -Recurse
-    
+    # 重新掃描儲存庫
+    $temp = Get-VBRBackupRepository
+    Rescan-VBREntity -Entity $VeeamBackupServer -Wait
+
     foreach ($VMName in $vms) {
-        Write-Host "Process ${VMName}"
         Out-LogFile -Level Info -Content "Start Export 【${VMName}】" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
-        Out-LogFile -Level Info -Content "Start Export 【${VMName}】" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
+        Out-LogFile -Level Info -Content "Start Export 【${VMName}】" -LogFilePath "${LogPath}" -ShowOnConsole
         
+        $result = Export-VeeamToVMDK -VMName ${VMName} -OutPath ${DestPath}
+        
+        <#
         # 檢查要匯出的主機是否在本機備份清單中
         if ((Get-VBRJobObject -Job $(Get-VBRJob)).Name -contains ${VMName}) {
             # 有就直接匯出
-            $result = Export-VeeamToVMDK -VMName ${VMName} -OutPath ${DestPath}
         }
         else {
             # 如果沒有，跑匯入備份檔並匯出的流程
@@ -211,13 +151,13 @@ else {
                     # 如果有找到再繼續
                     # 匯入 VBK
                     try {
-                        Out-LogFile -Level Info -Content "import ${VMName} vbk" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
-                        Out-LogFile -Level Info -Content "import ${VMName} vbk" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
-                        Import-VBRBackup -Server $RestoreServer -FileName "${VBKSource}"
+                        Out-LogFile -Level Info -Content "import ${VBKSource}" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                        Out-LogFile -Level Info -Content "import ${VBKSource}" -LogFilePath "${LogPath}" -ShowOnConsole
+                        Import-VBRBackup -Server $VeeamBackupServer -FileName "${VBKSource}"
                     }
                     catch {
-                        Out-LogFile -Level Error -Content "import ${VMName} fail" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
-                        Out-LogFile -Level Error -Content "import ${VMName} fail" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
+                        Out-LogFile -Level Error -Content "import ${VBKSource} fail" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
+                        Out-LogFile -Level Error -Content "import ${VBKSource} fail" -LogFilePath "${LogPath}" -ShowOnConsole
                     }
 
                     # 開始匯出
@@ -232,20 +172,20 @@ else {
                 }
                 else {
                     Out-LogFile -Level Error -Content "${VMName} VBK Not found" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
-                    Out-LogFile -Level Error -Content "${VMName} VBK Not found" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
+                    Out-LogFile -Level Error -Content "${VMName} VBK Not found" -LogFilePath "${LogPath}" -ShowOnConsole
                 }
             }
             else {
                 Out-LogFile -Level Error -Content "${VMName} BackupMeta Not found" -LogFilePath "${env:Temp}\Restore_${VMName}.log"
-                Out-LogFile -Level Error -Content "${VMName} BackupMeta Not found" -LogFilePath "${env:Temp}\Restore_VMDK.log" -ShowOnConsole
+                Out-LogFile -Level Error -Content "${VMName} BackupMeta Not found" -LogFilePath "${LogPath}" -ShowOnConsole
             }
             
         }
+        #>
 
         if (Test-Path "${env:Temp}\Restore_${VMName}.log") {
-            New-Item -ItemType Directory "${DestPath}\XXX-Log" -Force -ErrorAction SilentlyContinue | Out-Null
-            Move-Item "${env:Temp}\Restore_${VMName}.log" "${DestPath}\XXX-Log" -Force
-            Rename-Item "${DestPath}\XXX-Log\Restore_${VMName}.log" "Restore_${VMName}-$(Get-Date -Format 'yyyyMMdd_HHmm').log" -Force
+            Move-Item "${env:Temp}\Restore_${VMName}.log" "${LogFolder}" -Force
+            Rename-Item "${LogFolder}\Restore_${VMName}.log" "Restore_${VMName}-$(Get-Date -Format 'yyyyMMdd_HHmm').log" -Force
         }
     }
 
@@ -253,10 +193,4 @@ else {
     Disconnect-VBRServer
 }
 
-Out-LogFile -Level Info -Content "  End Export VMDK" -LogFilePath "${env:Temp}\Restore_VMDK.log"
-
-if (Test-Path "${env:Temp}\Restore_VMDK.log") {
-    New-Item -ItemType Directory "${DestPath}\XXX-Log" -Force -ErrorAction SilentlyContinue | Out-Null
-    Move-Item "${env:Temp}\Restore_VMDK.log" "${DestPath}\XXX-Log" -Force
-    Rename-Item "${DestPath}\XXX-Log\Restore_VMDK.log" "Restore_VMDK-$(Get-Date -Format 'yyyyMMdd_HHmm').log" -Force
-}
+Out-LogFile -Level Info -Content "========   End Export VMDK" -LogFilePath "${LogPath}" -ShowOnConsole
